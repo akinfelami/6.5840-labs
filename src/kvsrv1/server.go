@@ -56,9 +56,6 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 // If the key doesn't exist, Put installs the value if the
 // args.Version is 0, and returns ErrNoKey otherwise.
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// if server version matches, increment the version number of the key
-	// if no match we say no version.
-	// if version number is larger than 0 and key no exist
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	value, ok := kv.data[args.Key]
