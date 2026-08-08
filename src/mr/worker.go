@@ -27,6 +27,14 @@ type KeyValue struct {
 	Value string
 }
 
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+}
+
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
 func ihash(key string) int {
@@ -71,36 +79,36 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 		reply := AskForTask()
 		switch reply.Type {
 		case TaskWait:
-			log.Printf("Worker: received wait task, not doing anything...")
+			DPrintf("Worker: received wait task, not doing anything...")
 			continue
 		case TaskExit:
-			log.Printf("Worker: received exit task, exiting")
+			DPrintf("Worker: received exit task, exiting")
 			return
 		case TaskMap:
 			taskCompletion := TaskCompletion{ID: reply.ID, Type: TaskMap, Status: TaskIncomplete}
 			err := AttemptMapTask(reply, &taskCompletion, mapf)
 			if err != nil {
-				log.Printf("Worker: map task %d failed with error: %v", reply.ID, err)
+				DPrintf("Worker: map task %d failed with error: %v", reply.ID, err)
 				taskCompletion.Status = TaskFailed
 			}
 			ok := call("Coordinator.CompleteTask", &taskCompletion, &struct{}{})
 			if !ok {
-				log.Printf("Worker: failed to report completion of map task %d", reply.ID)
+				DPrintf("Worker: failed to report completion of map task %d", reply.ID)
 			}
 		case TaskReduce:
-			log.Printf("Worker: received reduce task %d", reply.ID)
+			DPrintf("Worker: received reduce task %d", reply.ID)
 			taskCompletion := TaskCompletion{ID: reply.ID, Type: TaskReduce, Status: TaskIncomplete}
 			err := AttemptReduceTask(reply, &taskCompletion, reducef)
 			if err != nil {
-				log.Printf("Worker: reduce task %d failed with error: %v", reply.ID, err)
+				DPrintf("Worker: reduce task %d failed with error: %v", reply.ID, err)
 				taskCompletion.Status = TaskFailed
 			}
 			ok := call("Coordinator.CompleteTask", &taskCompletion, &struct{}{})
 			if !ok {
-				log.Printf("Worker: failed to report completion of reduce task %d", reply.ID)
+				DPrintf("Worker: failed to report completion of reduce task %d", reply.ID)
 			}
 		default:
-			log.Printf("Worker: received unknown task type %v", reply.Type)
+			DPrintf("Worker: received unknown task type %v", reply.Type)
 		}
 	}
 }
@@ -192,9 +200,9 @@ func AskForTask() *TaskReply {
 
 	ok := call("Coordinator.AssignTask", &args, &reply)
 	if ok {
-		log.Printf("Worker: received task %v", reply)
+		DPrintf("Worker: received task %v", reply)
 	} else {
-		log.Printf("call failed!\n")
+		DPrintf("call failed!\n")
 	}
 	return &reply
 }
@@ -240,6 +248,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err := c.Call(rpcname, args, reply); err == nil {
 		return true
 	}
-	log.Printf("%d: call failed err %v", os.Getpid(), err)
+	DPrintf("%d: call failed err %v", os.Getpid(), err)
 	return false
 }

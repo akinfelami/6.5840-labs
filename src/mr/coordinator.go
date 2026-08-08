@@ -7,6 +7,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Phase int
@@ -18,13 +19,15 @@ const (
 )
 
 type MapTask struct {
-	filename string
-	status   int // 0: not started, 1: in progress, 2: completed
+	filename  string
+	status    int // 0: not started, 1: in progress, 2: completed
+	startedAt int64
 }
 
 type ReduceTask struct {
-	id     int // maps directly to the index of nReduce
-	status int // 0: not started, 1: in progress, 2: completed
+	id        int // maps directly to the index of nReduce
+	status    int // 0: not started, 1: in progress, 2: completed
+	startedAt int64
 }
 
 type Coordinator struct {
@@ -59,12 +62,27 @@ func (c *Coordinator) AssignTask(args *TaskRequest, reply *TaskReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Reset any tasks that have been in progress for too long (10 seconds)
+	// back to not started
+	for i, task := range c.mapTasks {
+		if task.status == 1 && time.Now().Unix()-task.startedAt > 10 {
+			c.mapTasks[i].status = 0
+		}
+	}
+
+	for i, task := range c.reduceTasks {
+		if task.status == 1 && time.Now().Unix()-task.startedAt > 10 {
+			c.reduceTasks[i].status = 0
+		}
+	}
+
 	switch c.phase {
 	case MapPhase:
 		for i, task := range c.mapTasks {
 			if task.status == 0 {
 				// assign this map task to the worker
 				c.mapTasks[i].status = 1
+				c.mapTasks[i].startedAt = time.Now().Unix()
 				reply.Type = TaskMap
 				reply.ID = i
 				reply.Filename = task.filename
@@ -85,6 +103,7 @@ func (c *Coordinator) AssignTask(args *TaskRequest, reply *TaskReply) error {
 		for i, task := range c.reduceTasks {
 			if task.status == 0 {
 				c.reduceTasks[i].status = 1
+				c.reduceTasks[i].startedAt = time.Now().Unix()
 				reply.Type = TaskReduce
 				reply.ID = i
 				reply.NReduce = c.nReduce
