@@ -1,6 +1,8 @@
 package kvsrv
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	tester "6.5840/tester1"
@@ -30,7 +32,9 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	arg := rpc.GetArgs{Key: key}
 	reply := rpc.GetReply{}
-	ck.clnt.Call(ck.server, "KVServer.Get", &arg, &reply)
+	for !ck.clnt.Call(ck.server, "KVServer.Get", &arg, &reply) {
+		time.Sleep(100 * time.Millisecond)
+	}
 	return reply.Value, reply.Version, reply.Err
 }
 
@@ -54,6 +58,21 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
 	arg := rpc.PutArgs{Key: key, Value: value, Version: version}
 	reply := rpc.PutReply{}
-	ck.clnt.Call(ck.server, "KVServer.Put", &arg, &reply)
+	resp := ck.clnt.Call(ck.server, "KVServer.Put", &arg, &reply)
+
+	// First rpc call went through successfully
+	//  just return the error from the server
+	if resp {
+		return reply.Err
+	}
+
+	// Otherwise we keep re-trying
+	for !ck.clnt.Call(ck.server, "KVServer.Put", &arg, &reply) {
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if reply.Err == rpc.ErrVersion {
+		return rpc.ErrMaybe
+	}
 	return reply.Err
 }
