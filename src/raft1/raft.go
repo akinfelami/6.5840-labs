@@ -7,7 +7,6 @@ package raft
 // In addition,  Make() creates a new raft peer that implements the
 // raft interface.
 
-
 import (
 	//	"bytes"
 	"math/rand"
@@ -17,9 +16,8 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
-
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -31,17 +29,32 @@ type Raft struct {
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	currentTerm int
+	votedFor    *int // this can be nil if no candidate has been voted for in the current term
+	CurrentRole Role
+	Log         []LogEntry
 }
+
+type LogEntry struct {
+	Command interface{}
+	Term    int
+}
+
+type Role int
+
+const (
+	Follower Role = iota
+	Candidate
+	Leader
+)
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
-	var term int
-	var isleader bool
-	// Your code here (3A).
-	return term, isleader
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.CurrentRole == Leader
 }
 
 // save Raft's persistent state to stable storage,
@@ -61,7 +74,6 @@ func (rf *Raft) persist() {
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
 }
-
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
@@ -90,7 +102,6 @@ func (rf *Raft) PersistBytes() int {
 	return rf.persister.RaftStateSize()
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -100,22 +111,54 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	Term        int
+	VoteGranted bool
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.VoteGranted = false
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
+		if args.LastLogTerm < rf.Log[args.LastLogIndex-1].Term {
+			return
+		}
+
+		// Here candidate probably has a lastlogterm equal to or greater than this server.
+		// If the logs end with the same term, candidate must have a longer log.
+		if args.LastLogTerm == rf.Log[args.LastLogIndex-1].Term && args.LastLogIndex < len(rf.Log) {
+			return
+		}
+
+		// Here we know that
+		// 1. The Candidate's LastLogTerm is greater than or equal to this server's LastLogTerm.
+		// 2. If the LastLogTerm is equal, then the Candidate's log is at least as long as this server's log.
+		// 3. Can safely grant the vote
+		reply.VoteGranted = true
+		reply.Term = args.Term
+		rf.votedFor = &args.CandidateId
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -150,7 +193,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -169,7 +211,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (3B).
 
-
 	return index, term, isLeader
 }
 
@@ -178,7 +219,6 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
-
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -210,7 +250,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
