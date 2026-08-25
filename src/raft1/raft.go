@@ -157,13 +157,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
-		if args.LastLogTerm < rf.log[args.LastLogIndex-1].Term {
+		var voterLastIndex, voterLastTerm int
+		if len(rf.log) > 0 {
+			voterLastIndex = len(rf.log) - 1
+			voterLastTerm = rf.log[len(rf.log)-1].Term
+		}
+		if args.LastLogTerm < voterLastTerm {
 			return
 		}
 
 		// Here candidate probably has a lastlogterm equal to or greater than this server.
 		// If the logs end with the same term, candidate must have a longer log.
-		if args.LastLogTerm == rf.log[args.LastLogIndex-1].Term && args.LastLogIndex < len(rf.log) {
+		if args.LastLogTerm == voterLastTerm && args.LastLogIndex < voterLastIndex {
 			return
 		}
 
@@ -174,6 +179,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		reply.Term = args.Term
 		rf.votedFor = &args.CandidateId
+		DPrintf("Server %d granting vote to %d for term %d", rf.me, args.CandidateId, args.Term)
 	}
 }
 
@@ -182,11 +188,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// This covers the cases such as:
-	// 1. term in RPC is less than currentTerm
-	// 2. Non-leader is receiving AppendEntries RPC
-	reply.Success = false
-	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		reply.Term = rf.currentTerm
+	} else {
+		// Too broad for now but works for elections
+		reply.Success = true
+		reply.Term = args.Term
+	}
+
+	// Reply false if log doesnt contain an entry at prevLogIndex
+	// whose term matches prevLogTerm
 
 	// TODO: This handler will only update succcess to true if it
 	// 1. prevLogIndex contains an entry and its term matches prevLogTerm
@@ -261,11 +273,17 @@ func (rf *Raft) startElection() {
 	term := rf.currentTerm
 	rf.currentRole = Candidate
 	rf.votedFor = &rf.me
+	DPrintf("Logs are this long %d", len(rf.log))
+	var lastLogIndex, lastLogTerm int
+	if len(rf.log) > 0 {
+		lastLogIndex = len(rf.log) - 1
+		lastLogTerm = rf.log[len(rf.log)-1].Term
+	}
 	req := &RequestVoteArgs{
 		Term:         term,
 		CandidateId:  rf.me,
-		LastLogIndex: len(rf.log) - 1,
-		LastLogTerm:  rf.log[len(rf.log)-1].Term,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
 	}
 	voteCount := 1
 	rf.mu.Unlock()
@@ -299,22 +317,40 @@ func (rf *Raft) startElection() {
 				voteCount++
 				if voteCount > len(rf.peers)/2 {
 					rf.currentRole = Leader
+					commitIndex := rf.commitIndex
+					var lastLogIndex, lastLogTerm int
+					if len(rf.log) > 0 {
+						lastLogIndex = len(rf.log) - 1
+						lastLogTerm = rf.log[len(rf.log)-1].Term
+					}
+					rf.mu.Unlock()
 					args := &AppendEntriesArgs{
 						Term:         term,
 						LeaderId:     rf.me,
-						PrevLogIndex: len(rf.log) - 1,
-						PrevLogTerm:  rf.log[len(rf.log)-1].Term,
+						PrevLogIndex: lastLogIndex,
+						PrevLogTerm:  lastLogTerm,
 						Entries:      nil,
-						LeaderCommit: rf.commitIndex,
+						LeaderCommit: commitIndex,
 					}
-					rf.mu.Unlock()
 
 					for i := range rf.peers {
 						if i == rf.me {
 							continue
 						}
-
-						go rf.sendAppendEntries(i, args, &AppendEntriesReply{})
+						// Leader needs to update itself if this returns a flase
+						go func(server int) {
+							var reply AppendEntriesReply
+							ok := rf.sendAppendEntries(server, args, &reply)
+							if ok {
+								rf.mu.Lock()
+								if reply.Term > rf.currentTerm {
+									rf.currentTerm = reply.Term
+									rf.currentRole = Follower
+									rf.votedFor = nil
+								}
+								rf.mu.Unlock()
+							}
+						}(i)
 					}
 					return
 
@@ -332,12 +368,12 @@ func (rf *Raft) ticker() {
 		electionTimeout := 500*time.Millisecond +
 			time.Duration(rand.Intn(400))*time.Millisecond
 		rf.mu.Lock()
-		if time.Since(rf.lastAppendEntries) >= electionTimeout {
-			// start a new election
-			if rf.currentRole != Leader {
-				rf.startElection()
-			}
-			rf.mu.Unlock()
+		shouldStart := time.Since(rf.lastAppendEntries) >= electionTimeout && rf.currentRole != Leader
+		// start a new election
+		rf.mu.Unlock()
+		if shouldStart {
+			DPrintf("Server %d starting election for term %d", rf.me, rf.currentTerm+1)
+			rf.startElection()
 		}
 
 		// pause for a random amount of time between 50 and 350
@@ -362,6 +398,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.lastAppendEntries = time.Now()
+	rf.log = []LogEntry{}
 
 	// Your initialization code here (3A, 3B, 3C).
 
