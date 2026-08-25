@@ -193,7 +193,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 2. if existing entry conflicts, delete the existing entry and all that follow it
 	// 3. append any new entries not already in the log
 	// 4. Commit.
-	//
 	rf.lastAppendEntries = time.Now()
 
 }
@@ -329,8 +328,6 @@ func (rf *Raft) startElection() {
 
 func (rf *Raft) ticker() {
 	for true {
-
-		// Your code here (3A)
 		// Check if a leader election should be started.
 		electionTimeout := 500*time.Millisecond +
 			time.Duration(rand.Intn(400))*time.Millisecond
