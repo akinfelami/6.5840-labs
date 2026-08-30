@@ -188,14 +188,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	reply.Term = rf.currentTerm
+	reply.Success = false
+
 	if args.Term < rf.currentTerm {
-		reply.Success = false
-		reply.Term = rf.currentTerm
-	} else {
-		// Too broad for now but works for elections
-		reply.Success = true
-		reply.Term = args.Term
+		return
 	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = nil
+	}
+
+	rf.currentRole = Follower
+	rf.lastAppendEntries = time.Now()
+	reply.Term = rf.currentTerm
 
 	// Reply false if log doesnt contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
@@ -205,7 +212,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 2. if existing entry conflicts, delete the existing entry and all that follow it
 	// 3. append any new entries not already in the log
 	// 4. Commit.
-	rf.lastAppendEntries = time.Now()
 
 }
 
@@ -273,7 +279,6 @@ func (rf *Raft) startElection() {
 	term := rf.currentTerm
 	rf.currentRole = Candidate
 	rf.votedFor = &rf.me
-	DPrintf("Logs are this long %d", len(rf.log))
 	var lastLogIndex, lastLogTerm int
 	if len(rf.log) > 0 {
 		lastLogIndex = len(rf.log) - 1
@@ -337,7 +342,7 @@ func (rf *Raft) startElection() {
 						if i == rf.me {
 							continue
 						}
-						// Leader needs to update itself if this returns a flase
+
 						go func(server int) {
 							var reply AppendEntriesReply
 							ok := rf.sendAppendEntries(server, args, &reply)
@@ -349,6 +354,7 @@ func (rf *Raft) startElection() {
 									rf.votedFor = nil
 								}
 								rf.mu.Unlock()
+								return
 							}
 						}(i)
 					}
@@ -362,24 +368,77 @@ func (rf *Raft) startElection() {
 	}
 }
 
-func (rf *Raft) ticker() {
+func (rf *Raft) ticker(fn func()) {
 	for true {
-		// Check if a leader election should be started.
-		electionTimeout := 500*time.Millisecond +
-			time.Duration(rand.Intn(400))*time.Millisecond
-		rf.mu.Lock()
-		shouldStart := time.Since(rf.lastAppendEntries) >= electionTimeout && rf.currentRole != Leader
-		// start a new election
-		rf.mu.Unlock()
-		if shouldStart {
-			DPrintf("Server %d starting election for term %d", rf.me, rf.currentTerm+1)
-			rf.startElection()
-		}
-
-		// pause for a random amount of time between 50 and 350
+		// pause for a random amount of time between 50 xand 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) ElectionHeartBeats() {
+	// Check if a leader election should be started.
+	electionTimeout := 500*time.Millisecond +
+		time.Duration(rand.Intn(400))*time.Millisecond
+	rf.mu.Lock()
+	shouldStart := time.Since(rf.lastAppendEntries) >= electionTimeout && rf.currentRole != Leader
+	// start a new election
+	rf.mu.Unlock()
+	if shouldStart {
+		DPrintf("Server %d starting election for term %d", rf.me, rf.currentTerm+1)
+		rf.startElection()
+	}
+}
+
+type HeartBeat int
+
+const (
+	Empty HeartBeat = iota
+	Regular
+)
+
+func (rf *Raft) SendHeartbeats(BeatType HeartBeat) {
+	rf.mu.Lock()
+	commitIndex := rf.commitIndex
+	var lastLogIndex, lastLogTerm int
+	if len(rf.log) > 0 {
+		lastLogIndex = len(rf.log) - 1
+		lastLogTerm = rf.log[len(rf.log)-1].Term
+	}
+
+	var entries []LogEntry
+	if BeatType == Regular {
+		entries = append([]LogEntry{}, rf.log...)
+	}
+	args := &AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: lastLogIndex,
+		PrevLogTerm:  lastLogTerm,
+		Entries:      entries,
+		LeaderCommit: commitIndex,
+	}
+	rf.mu.Unlock()
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		go func(server int) {
+			var reply AppendEntriesReply
+			ok := rf.sendAppendEntries(server, args, &reply)
+			if ok {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.currentRole = Follower
+					rf.votedFor = nil
+				}
+				rf.mu.Unlock()
+				return
+			}
+		}(i)
 	}
 }
 
@@ -407,9 +466,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker()
+	go rf.ticker(rf.ElectionHeartBeats)
 
 	// TODO: As aside leader has to send out periodic appendEntries rpcs
+	go rf.SendHeartbeats(Regular)
 
 	return rf
 }
