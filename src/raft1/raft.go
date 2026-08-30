@@ -156,6 +156,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.currentRole = Follower
+		rf.votedFor = nil
+	}
+
 	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
 		var voterLastIndex, voterLastTerm int
 		if len(rf.log) > 0 {
@@ -179,6 +185,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		reply.Term = args.Term
 		rf.votedFor = &args.CandidateId
+		rf.lastAppendEntries = time.Now()
 		DPrintf("Server %d granting vote to %d for term %d", rf.me, args.CandidateId, args.Term)
 	}
 }
@@ -198,6 +205,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = nil
+		rf.currentRole = Follower
 	}
 
 	rf.currentRole = Follower
@@ -291,6 +299,7 @@ func (rf *Raft) startElection() {
 		LastLogTerm:  lastLogTerm,
 	}
 	voteCount := 1
+	rf.lastAppendEntries = time.Now()
 	rf.mu.Unlock()
 	for i := range rf.peers {
 		if i == rf.me {
@@ -341,6 +350,7 @@ func (rf *Raft) PeriodicElectionTimer() {
 	shouldStart := time.Since(rf.lastAppendEntries) >= electionTimeout && rf.currentRole != Leader
 	// start a new election
 	rf.mu.Unlock()
+
 	if shouldStart {
 		DPrintf("Server %d starting election for term %d", rf.me, rf.currentTerm+1)
 		rf.startElection()
@@ -403,13 +413,13 @@ func (rf *Raft) SendAppendEntries(BeatType HeartBeat) {
 	}
 }
 
-func (rf *Raft) ticker(fn func()) {
+func (rf *Raft) ticker(pauseFor time.Duration, fn func()) {
 	for true {
-		// pause for a random amount of time between 50 xand 350
+		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		fn()
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// ms := 50 + (rand.Int63() % 300)
+		time.Sleep(pauseFor * time.Millisecond)
 	}
 }
 
@@ -437,9 +447,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker(rf.PeriodicElectionTimer)
+	go rf.ticker(50, rf.PeriodicElectionTimer)
 
-	go rf.ticker(func() {
+	go rf.ticker(100, func() {
 		rf.SendAppendEntries(Empty)
 	})
 
