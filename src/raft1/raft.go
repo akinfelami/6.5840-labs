@@ -322,44 +322,9 @@ func (rf *Raft) startElection() {
 				voteCount++
 				if voteCount > len(rf.peers)/2 {
 					rf.currentRole = Leader
-					commitIndex := rf.commitIndex
-					var lastLogIndex, lastLogTerm int
-					if len(rf.log) > 0 {
-						lastLogIndex = len(rf.log) - 1
-						lastLogTerm = rf.log[len(rf.log)-1].Term
-					}
 					rf.mu.Unlock()
-					args := &AppendEntriesArgs{
-						Term:         term,
-						LeaderId:     rf.me,
-						PrevLogIndex: lastLogIndex,
-						PrevLogTerm:  lastLogTerm,
-						Entries:      nil,
-						LeaderCommit: commitIndex,
-					}
-
-					for i := range rf.peers {
-						if i == rf.me {
-							continue
-						}
-
-						go func(server int) {
-							var reply AppendEntriesReply
-							ok := rf.sendAppendEntries(server, args, &reply)
-							if ok {
-								rf.mu.Lock()
-								if reply.Term > rf.currentTerm {
-									rf.currentTerm = reply.Term
-									rf.currentRole = Follower
-									rf.votedFor = nil
-								}
-								rf.mu.Unlock()
-								return
-							}
-						}(i)
-					}
+					rf.SendAppendEntries(Empty)
 					return
-
 				}
 			}
 			rf.mu.Unlock()
@@ -368,16 +333,7 @@ func (rf *Raft) startElection() {
 	}
 }
 
-func (rf *Raft) ticker(fn func()) {
-	for true {
-		// pause for a random amount of time between 50 xand 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-	}
-}
-
-func (rf *Raft) ElectionHeartBeats() {
+func (rf *Raft) PeriodicElectionTimer() {
 	// Check if a leader election should be started.
 	electionTimeout := 500*time.Millisecond +
 		time.Duration(rand.Intn(400))*time.Millisecond
@@ -398,8 +354,12 @@ const (
 	Regular
 )
 
-func (rf *Raft) SendHeartbeats(BeatType HeartBeat) {
+func (rf *Raft) SendAppendEntries(BeatType HeartBeat) {
 	rf.mu.Lock()
+	if rf.currentRole != Leader {
+		rf.mu.Unlock()
+		return
+	}
 	commitIndex := rf.commitIndex
 	var lastLogIndex, lastLogTerm int
 	if len(rf.log) > 0 {
@@ -420,6 +380,7 @@ func (rf *Raft) SendHeartbeats(BeatType HeartBeat) {
 		LeaderCommit: commitIndex,
 	}
 	rf.mu.Unlock()
+	DPrintf("Server %d sending AppendEntries to all peers for term %d for type %d", rf.me, rf.currentTerm, BeatType)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -439,6 +400,16 @@ func (rf *Raft) SendHeartbeats(BeatType HeartBeat) {
 				return
 			}
 		}(i)
+	}
+}
+
+func (rf *Raft) ticker(fn func()) {
+	for true {
+		// pause for a random amount of time between 50 xand 350
+		// milliseconds.
+		fn()
+		ms := 50 + (rand.Int63() % 300)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -466,10 +437,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	go rf.ticker(rf.ElectionHeartBeats)
+	go rf.ticker(rf.PeriodicElectionTimer)
 
-	// TODO: As aside leader has to send out periodic appendEntries rpcs
-	go rf.SendHeartbeats(Regular)
+	go rf.ticker(func() {
+		rf.SendAppendEntries(Empty)
+	})
 
 	return rf
 }
