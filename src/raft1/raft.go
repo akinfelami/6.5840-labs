@@ -34,7 +34,14 @@ type Raft struct {
 	currentRole       Role
 	log               []LogEntry
 	lastAppendEntries time.Time
-	commitIndex       int
+
+	// volatile state on all servers
+	commitIndex int
+	lastApplied int
+
+	// Volatile state on leaders to be re-init after election
+	nextIndex  []int
+	matchIndex []int
 }
 
 type LogEntry struct {
@@ -274,14 +281,39 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
 	isLeader := true
+	// rf.mu.Lock()
 
-	// Your code here (3B).
+	// // Your code here (3B).
+
+	// if rf.currentRole != Leader {
+	// 	// TODO: Does it matter what  the commitIndex and term are
+	// 	rf.mu.Unlock()
+	// 	return rf.commitIndex, rf.currentTerm, false
+	// }
+
+	// // Leader has received a command, needs to append to local log
+	// // respond after entry applied to state machine
+	// // then send appendEntries to all followers
+	// rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	// var index, term int
+	// index = len(rf.log) - 1
+	// term = rf.currentTerm
+	// DPrintf("Server %d received command %v for term %d, appended to log at index %d", rf.me, command, term, index)
+	// // Apply to state machine (whatever that means)
+	// rf.mu.Unlock()
+	// for i := range rf.peers {
+	// 	if i == rf.me {
+	// 		continue
+	// 	}
+
+	// 	if len(rf.log)-1 > rf.nextIndex[i] {
+	// 		// Send AppendEntries to this follower starting at nextIndex
+
+	// 	}
+
+	// }
 
 	return index, term, isLeader
-}
-
-func (rf *Raft) startElection() {
-
 }
 
 func (rf *Raft) PeriodicElectionTimer() {
@@ -337,8 +369,12 @@ func (rf *Raft) PeriodicElectionTimer() {
 					voteCount++
 					if voteCount > len(rf.peers)/2 {
 						rf.currentRole = Leader
+						for i := range rf.peers {
+							rf.nextIndex[i] = len(rf.log)
+							rf.matchIndex[i] = 0
+						}
 						rf.mu.Unlock()
-						rf.SendAppendEntries(Empty)
+						rf.SendHeartBeats()
 						return
 					}
 				}
@@ -352,25 +388,13 @@ func (rf *Raft) PeriodicElectionTimer() {
 
 }
 
-type HeartBeat int
-
-const (
-	Empty HeartBeat = iota
-	Regular
-)
-
-func (rf *Raft) SendAppendEntries(BeatType HeartBeat) {
+func (rf *Raft) SendHeartBeats() {
 	rf.mu.Lock()
 	if rf.currentRole != Leader {
 		rf.mu.Unlock()
 		return
 	}
 	commitIndex := rf.commitIndex
-
-	var entries []LogEntry
-	if BeatType == Regular {
-		entries = append([]LogEntry{}, rf.log...)
-	}
 	lastLogIndex := len(rf.log) - 1
 
 	args := &AppendEntriesArgs{
@@ -378,11 +402,11 @@ func (rf *Raft) SendAppendEntries(BeatType HeartBeat) {
 		LeaderId:     rf.me,
 		PrevLogIndex: lastLogIndex,
 		PrevLogTerm:  rf.log[lastLogIndex].Term,
-		Entries:      entries,
+		Entries:      nil,
 		LeaderCommit: commitIndex,
 	}
 	rf.mu.Unlock()
-	DPrintf("Server %d sending AppendEntries to all peers for term %d for type %d", rf.me, rf.currentTerm, BeatType)
+	DPrintf("Server %d sending heartbeat to all peers for term %d", rf.me, rf.currentTerm)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -432,7 +456,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.lastAppendEntries = time.Now()
 	rf.log = []LogEntry{{Term: 0, Command: nil}}
-
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 	// Your initialization code here (3A, 3B, 3C).
 
 	// initialize from state persisted before a crash
@@ -441,9 +466,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker(50, rf.PeriodicElectionTimer)
 
-	go rf.ticker(100, func() {
-		rf.SendAppendEntries(Empty)
-	})
+	go rf.ticker(100, rf.SendHeartBeats)
 
 	return rf
 }
