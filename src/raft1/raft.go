@@ -163,11 +163,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
-		var voterLastIndex, voterLastTerm int
-		if len(rf.log) > 0 {
-			voterLastIndex = len(rf.log) - 1
-			voterLastTerm = rf.log[len(rf.log)-1].Term
-		}
+
+		voterLastIndex := len(rf.log) - 1
+		voterLastTerm := rf.log[voterLastIndex].Term
+
 		if args.LastLogTerm < voterLastTerm {
 			return
 		}
@@ -282,64 +281,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) startElection() {
-	rf.mu.Lock()
-	rf.currentTerm++
-	term := rf.currentTerm
-	rf.currentRole = Candidate
-	rf.votedFor = &rf.me
-	var lastLogIndex, lastLogTerm int
-	if len(rf.log) > 0 {
-		lastLogIndex = len(rf.log) - 1
-		lastLogTerm = rf.log[len(rf.log)-1].Term
-	}
-	req := &RequestVoteArgs{
-		Term:         term,
-		CandidateId:  rf.me,
-		LastLogIndex: lastLogIndex,
-		LastLogTerm:  lastLogTerm,
-	}
-	voteCount := 1
-	rf.lastAppendEntries = time.Now()
-	rf.mu.Unlock()
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		go func(server int, term int) {
-			reply := &RequestVoteReply{}
-			ok := rf.sendRequestVote(server, req, reply)
-			if !ok {
-				return
-			}
-			rf.mu.Lock()
 
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.currentRole = Follower
-				rf.votedFor = nil
-				rf.mu.Unlock()
-				return
-			}
-
-			// Also gotta ignore replies from an election that already concluded
-			if rf.currentRole != Candidate || rf.currentTerm != term {
-				rf.mu.Unlock()
-				return
-			}
-
-			if reply.VoteGranted {
-				voteCount++
-				if voteCount > len(rf.peers)/2 {
-					rf.currentRole = Leader
-					rf.mu.Unlock()
-					rf.SendAppendEntries(Empty)
-					return
-				}
-			}
-			rf.mu.Unlock()
-
-		}(i, term)
-	}
 }
 
 func (rf *Raft) PeriodicElectionTimer() {
@@ -349,12 +291,65 @@ func (rf *Raft) PeriodicElectionTimer() {
 	rf.mu.Lock()
 	shouldStart := time.Since(rf.lastAppendEntries) >= electionTimeout && rf.currentRole != Leader
 	// start a new election
-	rf.mu.Unlock()
-
 	if shouldStart {
 		DPrintf("Server %d starting election for term %d", rf.me, rf.currentTerm+1)
-		rf.startElection()
+		rf.currentTerm++
+		term := rf.currentTerm
+		rf.currentRole = Candidate
+		rf.votedFor = &rf.me
+		lastLogIndex := len(rf.log) - 1
+		req := &RequestVoteArgs{
+			Term:         term,
+			CandidateId:  rf.me,
+			LastLogIndex: lastLogIndex,
+			LastLogTerm:  rf.log[lastLogIndex].Term,
+		}
+		voteCount := 1
+		rf.lastAppendEntries = time.Now()
+		rf.mu.Unlock()
+		for i := range rf.peers {
+			if i == rf.me {
+				continue
+			}
+			go func(server int, term int) {
+				reply := &RequestVoteReply{}
+				ok := rf.sendRequestVote(server, req, reply)
+				if !ok {
+					return
+				}
+				rf.mu.Lock()
+
+				if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.currentRole = Follower
+					rf.votedFor = nil
+					rf.mu.Unlock()
+					return
+				}
+
+				// Also gotta ignore replies from an election that already concluded
+				if rf.currentRole != Candidate || rf.currentTerm != term {
+					rf.mu.Unlock()
+					return
+				}
+
+				if reply.VoteGranted {
+					voteCount++
+					if voteCount > len(rf.peers)/2 {
+						rf.currentRole = Leader
+						rf.mu.Unlock()
+						rf.SendAppendEntries(Empty)
+						return
+					}
+				}
+				rf.mu.Unlock()
+
+			}(i, term)
+		}
+		return
 	}
+	rf.mu.Unlock()
+
 }
 
 type HeartBeat int
@@ -371,21 +366,18 @@ func (rf *Raft) SendAppendEntries(BeatType HeartBeat) {
 		return
 	}
 	commitIndex := rf.commitIndex
-	var lastLogIndex, lastLogTerm int
-	if len(rf.log) > 0 {
-		lastLogIndex = len(rf.log) - 1
-		lastLogTerm = rf.log[len(rf.log)-1].Term
-	}
 
 	var entries []LogEntry
 	if BeatType == Regular {
 		entries = append([]LogEntry{}, rf.log...)
 	}
+	lastLogIndex := len(rf.log) - 1
+
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: lastLogIndex,
-		PrevLogTerm:  lastLogTerm,
+		PrevLogTerm:  rf.log[lastLogIndex].Term,
 		Entries:      entries,
 		LeaderCommit: commitIndex,
 	}
@@ -439,7 +431,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.lastAppendEntries = time.Now()
-	rf.log = []LogEntry{}
+	rf.log = []LogEntry{{Term: 0, Command: nil}}
 
 	// Your initialization code here (3A, 3B, 3C).
 
