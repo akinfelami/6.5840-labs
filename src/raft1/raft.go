@@ -278,42 +278,59 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-	// rf.mu.Lock()
+	rf.mu.Lock()
 
-	// // Your code here (3B).
+	// Your code here (3B).
+	//
+	term := rf.currentTerm
+	if rf.currentRole != Leader {
+		// TODO: Does it matter what  the commitIndex and term are
+		rf.mu.Unlock()
+		return -1, term, false
+	}
 
-	// if rf.currentRole != Leader {
-	// 	// TODO: Does it matter what  the commitIndex and term are
-	// 	rf.mu.Unlock()
-	// 	return rf.commitIndex, rf.currentTerm, false
-	// }
+	// Leader has received a command, needs to append to local log
+	// respond after entry applied to state machine
+	// then send appendEntries to all followers
+	state := append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.log = state
+	index := len(rf.log) - 1
 
-	// // Leader has received a command, needs to append to local log
-	// // respond after entry applied to state machine
-	// // then send appendEntries to all followers
-	// rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
-	// var index, term int
-	// index = len(rf.log) - 1
-	// term = rf.currentTerm
-	// DPrintf("Server %d received command %v for term %d, appended to log at index %d", rf.me, command, term, index)
-	// // Apply to state machine (whatever that means)
-	// rf.mu.Unlock()
-	// for i := range rf.peers {
-	// 	if i == rf.me {
-	// 		continue
-	// 	}
+	DPrintf("Server %d received command %v for term %d, appended to log at index %d", rf.me, command, term, index)
 
-	// 	if len(rf.log)-1 > rf.nextIndex[i] {
-	// 		// Send AppendEntries to this follower starting at nextIndex
+	//TODO: Apply to state machine (whatever that means)
 
-	// 	}
+	rf.mu.Unlock()
+	for i := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		rf.mu.Lock()
+		if index >= rf.nextIndex[i] {
+			// Send AppendEntries to this follower starting at nextIndex
+			next := rf.nextIndex[i]
+			entries := append([]LogEntry(nil), state[next:]...)
+			args := &AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: next - 1,
+				PrevLogTerm:  rf.log[next-1].Term,
+				Entries:      entries,
+				LeaderCommit: rf.commitIndex,
+			}
+			rf.mu.Unlock()
+			go func(server int) {
+				var reply AppendEntriesReply
+				_ = rf.sendAppendEntries(server, args, &reply)
+			}(i)
+		} else {
+			rf.mu.Unlock()
 
-	// }
+		}
 
-	return index, term, isLeader
+	}
+	// TODO: Deal with this unlock placement
+	return index, term, true
 }
 
 func (rf *Raft) PeriodicElectionTimer() {
