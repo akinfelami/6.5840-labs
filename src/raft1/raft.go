@@ -368,14 +368,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		if index >= rf.nextIndex[i] {
 			// Send AppendEntries to this follower starting at nextIndex
 			next := rf.nextIndex[i]
-			entries := append([]LogEntry(nil), state[next:]...)
-			var Term, leaderId, prevLogTerm, commitIndex int
+			var Term, leaderId, commitIndex int
 			leaderId = rf.me
-			prevLogTerm = rf.log[next-1].Term
 			commitIndex = rf.commitIndex
 			Term = rf.currentTerm
 			rf.mu.Unlock()
-			go rf.sendLogEntries(Term, leaderId, next, prevLogTerm, commitIndex, i, entries)
+			go rf.sendLogEntries(Term, leaderId, next, commitIndex, i)
 		} else {
 			// Sorry about this abomination
 			rf.mu.Unlock()
@@ -387,7 +385,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, true
 }
 
-func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, prevLogTerm int, commitIndex int, server int, entries []LogEntry) {
+func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, commitIndex int, server int) {
 	curr := nextIndex
 	for {
 		rf.mu.Lock()
@@ -405,7 +403,7 @@ func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, prevLogTer
 		ok := rf.sendAppendEntries(server, args, &reply)
 		if ok {
 			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
+			if reply.Term > term {
 				rf.currentRole = Follower
 				rf.currentTerm = reply.Term
 				rf.votedFor = nil
@@ -419,15 +417,22 @@ func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, prevLogTer
 				for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
 					if rf.log[N].Term == rf.currentTerm && hasMajority(rf.matchIndex, N) {
 						rf.commitIndex = N
-						for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+						var lastApplied = rf.lastApplied
+						rf.mu.Unlock()
+						for i := lastApplied + 1; i <= N; i++ {
+							rf.mu.Lock()
+							command := rf.log[i].Command
+							rf.mu.Unlock()
 							rf.applyChannel <- raftapi.ApplyMsg{
 								CommandValid: true,
-								Command:      rf.log[i].Command,
+								Command:      command,
 								CommandIndex: i,
 							}
+							rf.mu.Lock()
+							rf.lastApplied = i
+							rf.mu.Unlock()
 						}
-						rf.lastApplied = rf.commitIndex
-						rf.mu.Unlock()
+
 						return
 					}
 				}
