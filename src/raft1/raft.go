@@ -211,13 +211,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
-	DPrintf("Server %d received AppendEntries from server %d for term %d with args %+v", rf.me, args.LeaderId, args.Term, args)
+	if len(args.Entries) > 0 {
+		DPrintf("Server %d received AppendEntries from server %d for term %d with args %+v", rf.me, args.LeaderId, args.Term, args)
+	}
 	reply.Term = rf.currentTerm
 	reply.Success = false
 
 	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
 		return
 	}
 
@@ -229,6 +231,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// Reply false if log doesnt contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
+	if args.PrevLogIndex >= len(rf.log) {
+		// does not contain an entry at prevLogIndex
+		rf.mu.Unlock()
+		return
+	}
 
 	// This handler will only update succcess to true if it
 	// 1. prevLogIndex contains an entry and its term matches prevLogTerm
@@ -250,14 +257,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-			rf.applyChannel <- raftapi.ApplyMsg{
-				CommandValid: true,
-				Command:      rf.log[rf.commitIndex].Command,
-				CommandIndex: rf.commitIndex,
+			var commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+			rf.commitIndex = commitIndex
+			var lastApplied = rf.lastApplied
+			rf.mu.Unlock()
+			for i := lastApplied + 1; i <= commitIndex; i++ {
+				rf.mu.Lock()
+				command := rf.log[i].Command
+				rf.mu.Unlock()
+				rf.applyChannel <- raftapi.ApplyMsg{
+					CommandValid: true,
+					Command:      command,
+					CommandIndex: i,
+				}
 			}
+		} else {
+			rf.mu.Unlock()
 		}
+		rf.mu.Lock()
+		rf.lastApplied = rf.commitIndex
+		rf.mu.Unlock()
+	} else {
+		rf.mu.Unlock()
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.lastAppendEntries = time.Now()
 
 }
@@ -328,6 +352,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	state := append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
 	rf.log = state
 	index := len(rf.log) - 1
+	rf.matchIndex[rf.me] = index
 
 	DPrintf("Server %d received command %v for term %d, appended to log at index %d", rf.me, command, term, index)
 
@@ -365,47 +390,54 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, prevLogTerm int, commitIndex int, server int, entries []LogEntry) {
 	curr := nextIndex
 	for {
+		rf.mu.Lock()
 		var reply AppendEntriesReply
 		args := &AppendEntriesArgs{
 			Term:         term,
 			LeaderId:     leaderId,
 			PrevLogIndex: curr - 1,
-			PrevLogTerm:  prevLogTerm,
-			Entries:      entries,
+			PrevLogTerm:  rf.log[curr-1].Term,
+			Entries:      rf.log[curr:],
 			LeaderCommit: commitIndex,
 		}
+		rf.mu.Unlock()
 		DPrintf("Server %d sending AppendEntries to server %d with args %+v", rf.me, server, args)
 		ok := rf.sendAppendEntries(server, args, &reply)
 		if ok {
 			rf.mu.Lock()
-			defer rf.mu.Unlock()
 			if reply.Term > rf.currentTerm {
 				rf.currentRole = Follower
 				rf.currentTerm = reply.Term
 				rf.votedFor = nil
+				rf.mu.Unlock()
 				return
 			}
-
 			if reply.Success {
-				rf.nextIndex[server] = curr + len(entries)
+				rf.nextIndex[server] = curr + len(args.Entries)
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
 
 				for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
 					if rf.log[N].Term == rf.currentTerm && hasMajority(rf.matchIndex, N) {
 						rf.commitIndex = N
-						rf.applyChannel <- raftapi.ApplyMsg{
-							CommandValid: true,
-							Command:      rf.log[N].Command,
-							CommandIndex: N,
+						for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+							rf.applyChannel <- raftapi.ApplyMsg{
+								CommandValid: true,
+								Command:      rf.log[i].Command,
+								CommandIndex: i,
+							}
 						}
-						break
+						rf.lastApplied = rf.commitIndex
+						rf.mu.Unlock()
+						return
 					}
 				}
+				rf.mu.Unlock()
 				return
 			}
 
 			// Log mismatch. Decrement nextIndex and try again
 			curr -= 1
+			rf.mu.Unlock()
 		} else {
 			break
 		}
