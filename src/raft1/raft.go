@@ -109,17 +109,25 @@ func (rf *Raft) GetState() (int, bool) {
 // second argument to persister.Save().
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
-func (rf *Raft) persist() {
+func (rf *Raft) persist(snaphost []byte) {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
-	if rf.votedFor != nil {
+	if rf.votedFor == nil {
+		// if you have more than 999 servers thats on u
+		e.Encode(999)
+	} else {
 		e.Encode(*rf.votedFor)
 	}
 	e.Encode(rf.log)
 	e.Encode(rf.lastIncludedIndex)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
+	if snaphost == nil {
+		rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
+	} else {
+		rf.persister.Save(raftstate, snaphost)
+	}
+
 	DPrintf("Server %d persisted state for term %d, votedFor %v, log length %d", rf.me, rf.currentTerm, rf.votedFor, len(rf.log))
 }
 
@@ -134,9 +142,14 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	} else {
 		rf.currentTerm = currentTerm
-		rf.votedFor = &votedFor
 		rf.log = log
 		rf.lastIncludedIndex = lastIncludedIndex
+		if votedFor == 999 {
+			rf.votedFor = nil
+		} else {
+			rf.votedFor = &votedFor
+
+		}
 	}
 }
 
@@ -153,7 +166,16 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index <= rf.lastIncludedIndex {
+		return
+	}
 
+	new_state := []LogEntry{{Term: rf.termAt(index), Command: nil}}
+	rf.log = append(new_state, rf.log[index-rf.lastIncludedIndex+1:]...)
+	rf.lastIncludedIndex = index
+	rf.persist(snapshot)
 }
 
 // example RequestVote RPC arguments structure.
@@ -191,6 +213,57 @@ type AppendEntriesReply struct {
 	XTerm   int
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Offset            int
+	Data              []byte
+	Done              bool
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
+		return
+	}
+
+	if args.Term >= rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.currentRole = Follower
+		rf.votedFor = nil
+		rf.persist(nil)
+	}
+
+	rf.lastAppendEntries = time.Now()
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		rf.mu.Unlock()
+		return
+	}
+
+	// No offsets implementation, assuming data has entire snapshot.
+	if args.LastIncludedIndex <= rf.lastLogIndex() && (rf.termAt(args.LastIncludedIndex) == args.LastIncludedTerm) {
+		new_state := []LogEntry{{Term: rf.termAt(args.LastIncludedIndex), Command: nil}}
+		rf.log = append(new_state, rf.log[args.LastIncludedIndex-rf.lastIncludedIndex+1:]...)
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		rf.persist(args.Data)
+	} else {
+		rf.log = []LogEntry{{Term: args.LastIncludedTerm, Command: nil}}
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		rf.persist(args.Data)
+
+	}
+	rf.mu.Unlock()
+
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
@@ -206,7 +279,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = args.Term
 		rf.currentRole = Follower
 		rf.votedFor = nil
-		rf.persist()
+		rf.persist(nil)
 	}
 
 	if rf.votedFor == nil || *rf.votedFor == args.CandidateId {
@@ -231,7 +304,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		reply.Term = args.Term
 		rf.votedFor = &args.CandidateId
-		rf.persist()
+		rf.persist(nil)
 		rf.lastAppendEntries = time.Now()
 		DPrintf("Server %d granting vote to %d for term %d", rf.me, args.CandidateId, args.Term)
 	}
@@ -241,6 +314,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 
 	if len(args.Entries) > 0 {
+
 		DPrintf("Server %d received AppendEntries from server %d for term %d. Log size %d", rf.me, args.LeaderId, args.Term, len(args.Entries))
 	}
 	reply.Term = rf.currentTerm
@@ -265,6 +339,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = args.Term
 	}
 
+	// AT this point, if the leader sends a log index, where
+	// my lastIncludedIndex is greater then we gotta reject it cus
+	// I already discarded those logs
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		reply.XIndex = rf.lastIncludedIndex + 1
+		rf.mu.Unlock()
+		return
+	}
+
 	// Reply false if log doesnt contain an entry at prevLogIndex
 	// whose term matches prevLogTerm
 	if args.PrevLogIndex >= rf.logLength() {
@@ -286,12 +369,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			index := args.PrevLogIndex + 1 + i // actual raft index
 			if index >= rf.logLength() {
 				rf.log = append(rf.log, args.Entries[i:]...)
-				rf.persist()
+				rf.persist(nil)
 				break
 			}
 			if rf.termAt(index) != args.Entries[i].Term {
 				rf.log = append(rf.log[:(index-rf.lastIncludedIndex)], args.Entries[i:]...)
-				rf.persist()
+				rf.persist(nil)
 				break
 			}
 		}
@@ -318,6 +401,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 func (rf *Raft) applyEntries() {
 	for {
 		rf.mu.Lock()
+		if rf.lastApplied < rf.lastIncludedIndex {
+			snapshot := rf.persister.ReadSnapshot()
+			snapshotTerm := rf.termAt(rf.lastIncludedIndex)
+			snapshotIndex := rf.lastIncludedIndex
+			rf.lastApplied = snapshotIndex
+			if rf.commitIndex < snapshotIndex {
+				rf.commitIndex = snapshotIndex
+			}
+			rf.mu.Unlock()
+			rf.applyChannel <- raftapi.ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      snapshot,
+				SnapshotTerm:  snapshotTerm,
+				SnapshotIndex: snapshotIndex,
+			}
+			continue
+		}
 		var lastApplied = rf.lastApplied
 		if lastApplied == rf.commitIndex {
 			rf.mu.Unlock()
@@ -326,6 +426,7 @@ func (rf *Raft) applyEntries() {
 		}
 		var nextIndex = lastApplied + 1
 		command := rf.commandAt(nextIndex)
+		rf.lastApplied = nextIndex
 		rf.mu.Unlock()
 		rf.applyChannel <- raftapi.ApplyMsg{
 			CommandValid: true,
@@ -333,9 +434,6 @@ func (rf *Raft) applyEntries() {
 
 			CommandIndex: nextIndex,
 		}
-		rf.mu.Lock()
-		rf.lastApplied = nextIndex
-		rf.mu.Unlock()
 	}
 }
 
@@ -376,6 +474,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+func (rf *Raft) sendInstallSnapShot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -403,7 +506,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// then send appendEntries to all followers
 	state := append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
 	rf.log = state
-	rf.persist()
+	rf.persist(nil)
 	index := rf.lastLogIndex()
 	rf.matchIndex[rf.me] = index
 
@@ -435,6 +538,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, true
 }
 
+func (rf *Raft) ShouldBeDemoted(replyTerm int) bool {
+	var shouldBeDemoted = false
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if replyTerm > rf.currentTerm {
+		rf.currentRole = Follower
+		rf.currentTerm = replyTerm
+		rf.votedFor = nil
+		rf.persist(nil)
+	}
+	return shouldBeDemoted
+}
+
 func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, commitIndex int, server int) {
 	curr := nextIndex
 	for {
@@ -443,6 +559,36 @@ func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, commitInde
 			rf.mu.Unlock()
 			return
 		}
+
+		// Do we need to install some snapshot first
+		if curr <= rf.lastIncludedIndex {
+			var reply InstallSnapshotReply
+			args := &InstallSnapshotArgs{
+				Term:              term,
+				LeaderId:          leaderId,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm:  rf.termAt(rf.lastIncludedIndex),
+				Offset:            0,
+				Data:              rf.persister.ReadSnapshot(),
+				Done:              true,
+			}
+			rf.mu.Unlock()
+			ok := rf.sendInstallSnapShot(server, args, &reply)
+			if ok {
+				if rf.ShouldBeDemoted(reply.Term) {
+					return
+				}
+				rf.mu.Lock()
+				rf.nextIndex[server] = args.LastIncludedIndex + 1
+				rf.matchIndex[server] = args.LastIncludedIndex
+				rf.mu.Unlock()
+				return
+			} else {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+		}
+
 		var reply AppendEntriesReply
 		args := &AppendEntriesArgs{
 			Term:         term,
@@ -456,15 +602,10 @@ func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, commitInde
 		DPrintf("Server %d sending AppendEntries to server %d", rf.me, server)
 		ok := rf.sendAppendEntries(server, args, &reply)
 		if ok {
-			rf.mu.Lock()
-			if reply.Term > rf.currentTerm {
-				rf.currentRole = Follower
-				rf.currentTerm = reply.Term
-				rf.votedFor = nil
-				rf.persist()
-				rf.mu.Unlock()
+			if rf.ShouldBeDemoted(reply.Term) {
 				return
 			}
+			rf.mu.Lock()
 			if reply.Success {
 				rf.nextIndex[server] = curr + len(args.Entries)
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
@@ -516,7 +657,7 @@ func (rf *Raft) PeriodicElectionTimer() {
 		term := rf.currentTerm
 		rf.currentRole = Candidate
 		rf.votedFor = &rf.me
-		rf.persist()
+		rf.persist(nil)
 		lastLogIndex := rf.lastLogIndex()
 		req := &RequestVoteArgs{
 			Term:         term,
@@ -543,7 +684,7 @@ func (rf *Raft) PeriodicElectionTimer() {
 					rf.currentTerm = reply.Term
 					rf.currentRole = Follower
 					rf.votedFor = nil
-					rf.persist()
+					rf.persist(nil)
 					rf.mu.Unlock()
 					return
 				}
@@ -586,6 +727,7 @@ func (rf *Raft) SendHeartBeats() {
 	// log the current leader
 	commitIndex := rf.commitIndex
 	lastLogIndex := rf.lastLogIndex()
+	lastIncludedIndex := rf.lastIncludedIndex
 
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -595,14 +737,42 @@ func (rf *Raft) SendHeartBeats() {
 		Entries:      nil,
 		LeaderCommit: commitIndex,
 	}
+
+	snapshotArgs := &InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.termAt(rf.lastIncludedIndex),
+		Offset:            0,
+		Data:              rf.persister.ReadSnapshot(),
+		Done:              true,
+	}
 	rf.mu.Unlock()
 	// DPrintf("Server %d sending heartbeat to all peers for term %d", rf.me, rf.currentTerm)
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-
 		go func(server int) {
+			// Do we need to install some snapshot first
+			rf.mu.Lock()
+			shouldInstallSnapshot := rf.nextIndex[server] <= rf.lastIncludedIndex
+			rf.mu.Unlock()
+			if shouldInstallSnapshot {
+				var reply InstallSnapshotReply
+				ok := rf.sendInstallSnapShot(server, snapshotArgs, &reply)
+				if ok {
+					if rf.ShouldBeDemoted(reply.Term) {
+						return
+					}
+					rf.mu.Lock()
+					rf.nextIndex[server] = lastIncludedIndex + 1
+					rf.matchIndex[server] = lastIncludedIndex
+					rf.mu.Unlock()
+					return
+				}
+			}
+
 			var reply AppendEntriesReply
 			ok := rf.sendAppendEntries(server, args, &reply)
 			if ok {
@@ -611,7 +781,7 @@ func (rf *Raft) SendHeartBeats() {
 					rf.currentTerm = reply.Term
 					rf.currentRole = Follower
 					rf.votedFor = nil
-					rf.persist()
+					rf.persist(nil)
 				}
 				rf.mu.Unlock()
 				return
@@ -655,8 +825,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	state := persister.ReadRaftState()
 	rf.readPersist(state)
-	// rf.commitIndex = 
-	// snapshot := persister.ReadSnapshot()
+	snapshot := persister.ReadSnapshot()
+	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.persister.Save(state, snapshot)
+
 	go rf.applyEntries()
 
 	// start ticker goroutine to start elections
