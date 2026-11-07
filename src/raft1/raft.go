@@ -236,9 +236,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	if args.Term >= rf.currentTerm {
+		if args.Term > rf.currentTerm {
+			rf.votedFor = nil
+
+		}
 		rf.currentTerm = args.Term
 		rf.currentRole = Follower
-		rf.votedFor = nil
+		reply.Term = args.Term
 		rf.persist(nil)
 	}
 
@@ -337,6 +341,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.currentRole = Follower
 		reply.Term = args.Term
+		rf.persist(nil)
 	}
 
 	// AT this point, if the leader sends a log index, where
@@ -581,8 +586,9 @@ func (rf *Raft) sendLogEntries(term int, leaderId int, nextIndex int, commitInde
 				rf.mu.Lock()
 				rf.nextIndex[server] = args.LastIncludedIndex + 1
 				rf.matchIndex[server] = args.LastIncludedIndex
+				curr = args.LastIncludedIndex + 1
 				rf.mu.Unlock()
-				return
+				continue
 			} else {
 				time.Sleep(100 * time.Millisecond)
 				continue
@@ -726,27 +732,8 @@ func (rf *Raft) SendHeartBeats() {
 	}
 	// log the current leader
 	commitIndex := rf.commitIndex
-	lastLogIndex := rf.lastLogIndex()
-	lastIncludedIndex := rf.lastIncludedIndex
-
-	args := &AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: lastLogIndex,
-		PrevLogTerm:  rf.termAt(lastLogIndex),
-		Entries:      nil,
-		LeaderCommit: commitIndex,
-	}
-
-	snapshotArgs := &InstallSnapshotArgs{
-		Term:              rf.currentTerm,
-		LeaderId:          rf.me,
-		LastIncludedIndex: rf.lastIncludedIndex,
-		LastIncludedTerm:  rf.termAt(rf.lastIncludedIndex),
-		Offset:            0,
-		Data:              rf.persister.ReadSnapshot(),
-		Done:              true,
-	}
+	term := rf.currentTerm
+	leaderId := rf.me
 	rf.mu.Unlock()
 	// DPrintf("Server %d sending heartbeat to all peers for term %d", rf.me, rf.currentTerm)
 	for i := range rf.peers {
@@ -754,38 +741,10 @@ func (rf *Raft) SendHeartBeats() {
 			continue
 		}
 		go func(server int) {
-			// Do we need to install some snapshot first
 			rf.mu.Lock()
-			shouldInstallSnapshot := rf.nextIndex[server] <= rf.lastIncludedIndex
+			next := rf.nextIndex[server]
 			rf.mu.Unlock()
-			if shouldInstallSnapshot {
-				var reply InstallSnapshotReply
-				ok := rf.sendInstallSnapShot(server, snapshotArgs, &reply)
-				if ok {
-					if rf.ShouldBeDemoted(reply.Term) {
-						return
-					}
-					rf.mu.Lock()
-					rf.nextIndex[server] = lastIncludedIndex + 1
-					rf.matchIndex[server] = lastIncludedIndex
-					rf.mu.Unlock()
-					return
-				}
-			}
-
-			var reply AppendEntriesReply
-			ok := rf.sendAppendEntries(server, args, &reply)
-			if ok {
-				rf.mu.Lock()
-				if reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.currentRole = Follower
-					rf.votedFor = nil
-					rf.persist(nil)
-				}
-				rf.mu.Unlock()
-				return
-			}
+			rf.sendLogEntries(term, leaderId, next, commitIndex, server)
 		}(i)
 	}
 }

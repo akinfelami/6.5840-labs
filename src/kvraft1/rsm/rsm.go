@@ -5,18 +5,26 @@ import (
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Me  int
+	Id  int64
+	Req interface{}
 }
 
+type OpResponse struct {
+	response chan any
+	term     int
+	opId     int64
+	LeaderId int
+}
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -38,6 +46,8 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	counter    int64
+	opResponse map[int]OpResponse
 }
 
 // servers[] contains the ports of the set of
@@ -61,17 +71,18 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		opResponse:   make(map[int]OpResponse),
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	go rsm.ApplyChannelReader()
 	return rsm
 }
 
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
-
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
@@ -81,7 +92,60 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// Submit creates an Op structure to run a command through Raft;
 	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
 	// is the argument to Submit and id is a unique id for the op.
+	rsm.mu.Lock()
+	op := Op{Me: rsm.me, Id: rsm.counter, Req: req}
+	rsm.counter++
+	indexToBeCommittedAt, currentTerm, isLeader := rsm.rf.Start(op)
+	if !isLeader {
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+	ch := make(chan any)
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	rsm.opResponse[indexToBeCommittedAt] = OpResponse{
+		response: ch,
+		term:     currentTerm,
+		opId:     op.Id,
+		LeaderId: op.Me}
+
+	rsm.mu.Unlock()
+
+	res, ok := <-ch
+	if !ok {
+		return rpc.ErrWrongLeader, nil
+	}
+	return rpc.OK, res
+}
+
+func (rsm *RSM) ApplyChannelReader() {
+	for msg := range rsm.applyCh {
+		cmdResp := msg.Command.(Op)
+		res := rsm.sm.DoOp(cmdResp.Req)
+		rsm.mu.Lock()
+		respChan, ok := rsm.opResponse[msg.CommandIndex]
+		rsm.mu.Unlock()
+		if !ok {
+			continue
+		}
+
+		if cmdResp.Id != respChan.opId || cmdResp.Me != respChan.LeaderId {
+			// This was previously a leader
+			// Need to close all channels where Submit is waiting
+			rsm.mu.Lock()
+			for idx, ch := range rsm.opResponse {
+				curr_term, _ := rsm.rf.GetState()
+				if curr_term != ch.term {
+					close(ch.response)
+					delete(rsm.opResponse, idx)
+				}
+			}
+			rsm.mu.Unlock()
+
+		} else {
+			respChan.response <- res
+			rsm.mu.Lock()
+			delete(rsm.opResponse, msg.CommandIndex)
+			rsm.mu.Unlock()
+		}
+	}
 }
