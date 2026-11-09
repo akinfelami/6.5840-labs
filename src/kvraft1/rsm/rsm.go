@@ -2,6 +2,7 @@ package rsm
 
 import (
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -110,11 +111,20 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 
 	rsm.mu.Unlock()
 
-	res, ok := <-ch
-	if !ok {
-		return rpc.ErrWrongLeader, nil
+	for {
+		select {
+		case res, ok := <-ch:
+			if !ok {
+				return rpc.ErrWrongLeader, nil
+			}
+			return rpc.OK, res
+		case <-time.After(20 * time.Millisecond):
+			curr_term, _ := rsm.rf.GetState()
+			if curr_term != currentTerm {
+				return rpc.ErrWrongLeader, nil
+			}
+		}
 	}
-	return rpc.OK, res
 }
 
 func (rsm *RSM) ApplyChannelReader() {

@@ -1,16 +1,17 @@
 package kvraft
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"time"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	leader int // last successful leader (index into servers[])
+	leader  int // last successful leader (index into servers[])
 	// You can add to this struct.
 }
 
@@ -36,8 +37,16 @@ func (ck *Clerk) Leader() int {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
-	// You will have to modify this function.
-	return "", 0, ""
+	arg := rpc.GetArgs{Key: key}
+	reply := rpc.GetReply{}
+
+	for !ck.clnt.Call(ck.servers[ck.Leader()], "KVServer.Get", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+		time.Sleep(20 * time.Millisecond)
+		reply = rpc.GetReply{}
+	}
+
+	return reply.Value, reply.Version, reply.Err
 }
 
 // Put updates key with value only if the version in the
@@ -59,5 +68,19 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	arg := rpc.PutArgs{Key: key, Value: value, Version: version}
+	retried := false
+	for {
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.servers[ck.Leader()], "KVServer.Put", &arg, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			if reply.Err == rpc.ErrVersion && retried {
+				return rpc.ErrMaybe
+			}
+			return reply.Err
+		}
+		retried = true
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+		time.Sleep(20 * time.Millisecond)
+	}
 }
