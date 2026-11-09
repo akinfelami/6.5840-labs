@@ -77,6 +77,11 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	snapshot := persister.ReadSnapshot()
+	if len(snapshot) > 0 {
+		sm.Restore(snapshot)
+	}
 	go rsm.ApplyChannelReader()
 	return rsm
 }
@@ -121,6 +126,10 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		case <-time.After(20 * time.Millisecond):
 			curr_term, _ := rsm.rf.GetState()
 			if curr_term != currentTerm {
+				rsm.mu.Lock()
+				close(ch)
+				delete(rsm.opResponse, indexToBeCommittedAt)
+				rsm.mu.Unlock()
 				return rpc.ErrWrongLeader, nil
 			}
 		}
@@ -129,33 +138,41 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 
 func (rsm *RSM) ApplyChannelReader() {
 	for msg := range rsm.applyCh {
-		cmdResp := msg.Command.(Op)
-		res := rsm.sm.DoOp(cmdResp.Req)
-		rsm.mu.Lock()
-		respChan, ok := rsm.opResponse[msg.CommandIndex]
-		rsm.mu.Unlock()
-		if !ok {
-			continue
-		}
-
-		if cmdResp.Id != respChan.opId || cmdResp.Me != respChan.LeaderId {
-			// This was previously a leader
-			// Need to close all channels where Submit is waiting
+		if msg.SnapshotValid {
+			rsm.sm.Restore(msg.Snapshot)
+		} else {
+			cmdResp := msg.Command.(Op)
+			res := rsm.sm.DoOp(cmdResp.Req)
 			rsm.mu.Lock()
-			for idx, ch := range rsm.opResponse {
-				curr_term, _ := rsm.rf.GetState()
-				if curr_term != ch.term {
-					close(ch.response)
-					delete(rsm.opResponse, idx)
-				}
+			respChan, ok := rsm.opResponse[msg.CommandIndex]
+			if rsm.maxraftstate != -1 && rsm.maxraftstate-rsm.rf.PersistBytes() <= 2 {
+				snapshot := rsm.sm.Snapshot()
+				rsm.rf.Snapshot(msg.CommandIndex, snapshot)
 			}
 			rsm.mu.Unlock()
+			if !ok {
+				continue
+			}
 
-		} else {
-			respChan.response <- res
-			rsm.mu.Lock()
-			delete(rsm.opResponse, msg.CommandIndex)
-			rsm.mu.Unlock()
+			if cmdResp.Id != respChan.opId || cmdResp.Me != respChan.LeaderId {
+				// This was previously a leader
+				// Need to close all channels where Submit is waiting
+				rsm.mu.Lock()
+				for idx, ch := range rsm.opResponse {
+					curr_term, _ := rsm.rf.GetState()
+					if curr_term != ch.term {
+						close(ch.response)
+						delete(rsm.opResponse, idx)
+					}
+				}
+				rsm.mu.Unlock()
+
+			} else {
+				respChan.response <- res
+				rsm.mu.Lock()
+				delete(rsm.opResponse, msg.CommandIndex)
+				rsm.mu.Unlock()
+			}
 		}
 	}
 }
