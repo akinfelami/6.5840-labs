@@ -127,7 +127,6 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 			curr_term, _ := rsm.rf.GetState()
 			if curr_term != currentTerm {
 				rsm.mu.Lock()
-				close(ch)
 				delete(rsm.opResponse, indexToBeCommittedAt)
 				rsm.mu.Unlock()
 				return rpc.ErrWrongLeader, nil
