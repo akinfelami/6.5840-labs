@@ -9,18 +9,19 @@ package shardkv
 //
 
 import (
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardctrler"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
-	rcks   map[tester.Tgid]*shardgrp.Clerk
+	rcks map[tester.Tgid]*shardgrp.Clerk
 	// You will have to modify this struct.
 }
 
@@ -41,19 +42,36 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 	return rck, ok
 }
 
-
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
 // find the shard responsible for the key and ck.sck.Query() to read
 // the current configuration and lookup the servers in the group
 // responsible for key.  You can make a clerk for that group by
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
-	return "", 0, ""
+	cfg := ck.sck.Query()
+	gid := cfg.Shards[shardcfg.Key2Shard(key)]
+	servers := cfg.Groups[gid]
+	clerk, ok := ck.rcks[gid]
+	if !ok {
+		clerk = shardgrp.MakeClerk(ck.clnt, servers)
+		ck.rcks[gid] = clerk
+	} else {
+		clerk = ck.rcks[gid]
+	}
+	return clerk.Get(key)
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	cfg := ck.sck.Query()
+	gid := cfg.Shards[shardcfg.Key2Shard(key)]
+	servers := cfg.Groups[gid]
+	clerk, ok := ck.rcks[gid]
+	if !ok {
+		clerk = shardgrp.MakeClerk(ck.clnt, servers)
+		ck.rcks[gid] = clerk
+	} else {
+		clerk = ck.rcks[gid]
+	}
+	return clerk.Put(key, value, version)
 }

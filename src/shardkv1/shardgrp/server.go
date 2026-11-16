@@ -1,50 +1,119 @@
 package shardgrp
 
 import (
+	"bytes"
+	"sync"
 
 	"6.5840/kvraft1/rsm"
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/shardkv1/shardgrp/shardrpc"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 const (
 	ENVKEY = "65840ENV"
 )
 
+type KvValue struct {
+	Value   string
+	Version rpc.Tversion
+}
 
 type KVServer struct {
 	me  int
 	rsm *rsm.RSM
 	gid tester.Tgid
+	mu  sync.Mutex
 
-	// Your code here
+	Data map[string]KvValue
 }
-
 
 func (kv *KVServer) DoOp(req any) any {
-	// Your code here
-	return nil
+	switch args := req.(type) {
+	case rpc.GetArgs:
+		reply := rpc.GetReply{}
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		value, ok := kv.Data[args.Key]
+		if !ok {
+			reply.Err = rpc.ErrNoKey
+			return reply
+		}
+		reply.Value = value.Value
+		reply.Version = value.Version
+		reply.Err = rpc.OK
+		return reply
+	case rpc.PutArgs:
+		reply := rpc.PutReply{}
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		value, ok := kv.Data[args.Key]
+		if !ok {
+			// Key no exist, we gotta check version number
+			if args.Version > 0 {
+				reply.Err = rpc.ErrNoKey
+				return reply
+			} else {
+				// Install the value with version 1
+				kv.Data[args.Key] = KvValue{Value: args.Value, Version: 1}
+				reply.Err = rpc.OK
+				return reply
+			}
+		}
+		// Here we know key exits gotta compare version numbers
+		if args.Version != value.Version {
+			reply.Err = rpc.ErrVersion
+			return reply
+		}
+
+		// Finally version numbers match
+		kv.Data[args.Key] = KvValue{Value: args.Value, Version: value.Version + 1}
+		reply.Err = rpc.OK
+		return reply
+	default:
+		return nil
+	}
 }
 
-
 func (kv *KVServer) Snapshot() []byte {
-	// Your code here
-	return nil
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.Data)
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	// Your code here
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var mapData map[string]KvValue
+	if d.Decode(&mapData) != nil {
+		return
+	}
+	kv.Data = mapData
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
-	// Your code here
+	err, rep := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	*reply = rep.(rpc.GetReply)
 }
 
 func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
-	// Your code here
+	err, rep := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	*reply = rep.(rpc.PutReply)
 }
 
 // Freeze the specified shard (i.e., reject future Get/Puts for this
@@ -77,7 +146,7 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.DeleteShardArgs{})
 	labgob.Register(rsm.Op{})
 
-	kv := &KVServer{gid: gid, me: me}
+	kv := &KVServer{gid: gid, me: me, Data: make(map[string]KvValue)}
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 
 	// Your code here
