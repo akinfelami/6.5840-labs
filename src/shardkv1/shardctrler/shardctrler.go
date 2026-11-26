@@ -36,6 +36,20 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	curr, version, err := sck.Get("init")
+	if err != rpc.OK {
+		return
+	}
+	next, _, next_err := sck.Get("next")
+	if next_err != rpc.OK {
+		return
+	}
+
+	nextConfig := shardcfg.FromString(next)
+	oldConfig := shardcfg.FromString(curr)
+	if nextConfig.Num > oldConfig.Num {
+		sck.moveConfig(oldConfig, version, nextConfig)
+	}
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -47,6 +61,7 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	cfg_string := cfg.String()
 	// Assuming this cannot fail ---
 	sck.Put("init", cfg_string, 0)
+	sck.Put("next", cfg_string, 0)
 }
 
 // Called by the tester to ask the controller to change the
@@ -58,10 +73,27 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	if err != rpc.OK {
 		return
 	}
+	_, nextVersion, err := sck.Get("next")
+	if err != rpc.OK {
+		return
+	}
+	// Store next config
+	err = sck.Put("next", new.String(), nextVersion)
 	oldCfg := shardcfg.FromString(cfg)
-	cfg_string := new.String()
+	sck.moveConfig(oldCfg, version, new)
+}
+
+// Return the current configuration
+func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
+	// Also assuming this did not fail --
+	cfg, _, _ := sck.Get("init")
+
+	return shardcfg.FromString(cfg)
+}
+
+func (sck *ShardCtrler) moveConfig(oldCfg *shardcfg.ShardConfig, currVersion rpc.Tversion, new *shardcfg.ShardConfig) {
 	for i := range shardcfg.NShards {
-		// source is oldCfg, dest in new
+
 		oldGid := oldCfg.Shards[i]
 		newGid := new.Shards[i]
 		if oldGid != newGid {
@@ -83,18 +115,8 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 
 	}
-
-	err = sck.Put("init", cfg_string, version)
+	err := sck.Put("init", new.String(), currVersion)
 	if err != rpc.OK {
 		return
 	}
-
-}
-
-// Return the current configuration
-func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
-	// Also assuming this did not fail --
-	cfg, _, _ := sck.Get("init")
-
-	return shardcfg.FromString(cfg)
 }
