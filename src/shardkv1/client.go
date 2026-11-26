@@ -9,6 +9,8 @@ package shardkv
 //
 
 import (
+	"time"
+
 	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp"
 
@@ -48,30 +50,52 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 // responsible for key.  You can make a clerk for that group by
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	cfg := ck.sck.Query()
-	gid := cfg.Shards[shardcfg.Key2Shard(key)]
-	servers := cfg.Groups[gid]
-	clerk, ok := ck.rcks[gid]
-	if !ok {
-		clerk = shardgrp.MakeClerk(ck.clnt, servers)
-		ck.rcks[gid] = clerk
-	} else {
-		clerk = ck.rcks[gid]
+	for {
+
+		cfg := ck.sck.Query()
+		gid := cfg.Shards[shardcfg.Key2Shard(key)]
+		servers := cfg.Groups[gid]
+		clerk, ok := ck.rcks[gid]
+		if !ok {
+			clerk = shardgrp.MakeClerk(ck.clnt, servers)
+			ck.rcks[gid] = clerk
+		} else {
+			clerk = ck.rcks[gid]
+		}
+
+		val, version, err := clerk.Get(key)
+		if err != rpc.ErrWrongGroup && err != rpc.ErrWrongLeader {
+			return val, version, err
+		}
+		time.Sleep(20 * time.Millisecond)
+
 	}
-	return clerk.Get(key)
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	cfg := ck.sck.Query()
-	gid := cfg.Shards[shardcfg.Key2Shard(key)]
-	servers := cfg.Groups[gid]
-	clerk, ok := ck.rcks[gid]
-	if !ok {
-		clerk = shardgrp.MakeClerk(ck.clnt, servers)
-		ck.rcks[gid] = clerk
-	} else {
-		clerk = ck.rcks[gid]
+	retried := false
+	for {
+		cfg := ck.sck.Query()
+		gid := cfg.Shards[shardcfg.Key2Shard(key)]
+		servers := cfg.Groups[gid]
+		clerk, ok := ck.rcks[gid]
+		if !ok {
+			clerk = shardgrp.MakeClerk(ck.clnt, servers)
+			ck.rcks[gid] = clerk
+		} else {
+			clerk = ck.rcks[gid]
+		}
+
+		err := clerk.Put(key, value, version)
+		if err == rpc.ErrVersion && retried {
+			return rpc.ErrMaybe
+		}
+
+		if err != rpc.ErrWrongGroup && err != rpc.ErrWrongLeader {
+			return err
+		}
+		retried = true
+		time.Sleep(20 * time.Millisecond)
 	}
-	return clerk.Put(key, value, version)
 }

@@ -6,8 +6,10 @@ package shardctrler
 
 import (
 	kvsrv "6.5840/kvsrv1"
+	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
+	"6.5840/shardkv1/shardgrp"
 	tester "6.5840/tester1"
 )
 
@@ -52,7 +54,41 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // changes the configuration it may be superseded by another
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
-	// Your code here.
+	cfg, version, err := sck.Get("init")
+	if err != rpc.OK {
+		return
+	}
+	oldCfg := shardcfg.FromString(cfg)
+	cfg_string := new.String()
+	for i := range shardcfg.NShards {
+		// source is oldCfg, dest in new
+		oldGid := oldCfg.Shards[i]
+		newGid := new.Shards[i]
+		if oldGid != newGid {
+			oldClerk := shardgrp.MakeClerk(sck.clnt, oldCfg.Groups[oldGid])
+			newClerk := shardgrp.MakeClerk(sck.clnt, new.Groups[newGid])
+
+			state, err := oldClerk.FreezeShard(shardcfg.Tshid(i), new.Num)
+			if err != rpc.OK {
+				return
+			}
+			err = newClerk.InstallShard(shardcfg.Tshid(i), state, new.Num)
+			if err != rpc.OK {
+				return
+			}
+			err = oldClerk.DeleteShard(shardcfg.Tshid(i), new.Num)
+			if err != rpc.OK {
+				return
+			}
+		}
+
+	}
+
+	err = sck.Put("init", cfg_string, version)
+	if err != rpc.OK {
+		return
+	}
+
 }
 
 // Return the current configuration
