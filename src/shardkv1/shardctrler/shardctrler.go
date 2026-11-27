@@ -5,6 +5,8 @@ package shardctrler
 //
 
 import (
+	"time"
+
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
@@ -73,14 +75,32 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	if err != rpc.OK {
 		return
 	}
-	_, nextVersion, err := sck.Get("next")
+	nextCfg, nextVersion, err := sck.Get("next")
 	if err != rpc.OK {
 		return
 	}
-	// Store next config
-	err = sck.Put("next", new.String(), nextVersion)
-	oldCfg := shardcfg.FromString(cfg)
-	sck.moveConfig(oldCfg, version, new)
+	next := shardcfg.FromString(nextCfg)
+	if new.Num == next.Num+1 {
+		// only case to take action
+		// Store next config
+		err = sck.Put("next", new.String(), nextVersion)
+		if err == rpc.ErrVersion {
+			// Already has this version
+			return
+		}
+		if err == rpc.ErrMaybe {
+			nextCfg, nextVersion, err = sck.Get("next")
+			next = shardcfg.FromString(nextCfg)
+			if next.Num != new.Num {
+				// That did not work
+				return
+			}
+		}
+		oldCfg := shardcfg.FromString(cfg)
+		sck.moveConfig(oldCfg, version, new)
+		return
+	}
+
 }
 
 // Return the current configuration
@@ -100,23 +120,58 @@ func (sck *ShardCtrler) moveConfig(oldCfg *shardcfg.ShardConfig, currVersion rpc
 			oldClerk := shardgrp.MakeClerk(sck.clnt, oldCfg.Groups[oldGid])
 			newClerk := shardgrp.MakeClerk(sck.clnt, new.Groups[newGid])
 
-			state, err := oldClerk.FreezeShard(shardcfg.Tshid(i), new.Num)
-			if err != rpc.OK {
+			var state []byte
+			var err rpc.Err
+
+			for {
+				state, err = oldClerk.FreezeShard(shardcfg.Tshid(i), new.Num)
+				if err == rpc.OK {
+					break
+				}
+				if err == rpc.ErrWrongLeader {
+					curr, _, err := sck.Get("init")
+					if err != rpc.OK {
+						return
+					}
+					cfg := shardcfg.FromString(curr)
+					if cfg.Num < new.Num {
+						time.Sleep(20 * time.Millisecond)
+						continue
+					}
+
+				}
 				return
 			}
-			err = newClerk.InstallShard(shardcfg.Tshid(i), state, new.Num)
-			if err != rpc.OK {
-				return
-			}
-			err = oldClerk.DeleteShard(shardcfg.Tshid(i), new.Num)
-			if err != rpc.OK {
-				return
-			}
+
+			sck.doWithRetry(func() rpc.Err { return newClerk.InstallShard(shardcfg.Tshid(i), state, new.Num) }, new.Num)
+			sck.doWithRetry(func() rpc.Err { return oldClerk.DeleteShard(shardcfg.Tshid(i), new.Num) }, new.Num)
 		}
 
 	}
 	err := sck.Put("init", new.String(), currVersion)
 	if err != rpc.OK {
+		return
+	}
+}
+
+func (sck *ShardCtrler) doWithRetry(op func() rpc.Err, newNum shardcfg.Tnum) {
+	for {
+		err := op()
+		if err == rpc.OK {
+			break
+		}
+		if err == rpc.ErrWrongLeader {
+			curr, _, err := sck.Get("init")
+			if err != rpc.OK {
+				return
+			}
+			cfg := shardcfg.FromString(curr)
+			if cfg.Num < newNum {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+
+		}
 		return
 	}
 }

@@ -1,8 +1,6 @@
 package shardgrp
 
 import (
-	"time"
-
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp/shardrpc"
@@ -54,10 +52,11 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.Err) {
 	arg := shardrpc.FreezeShardArgs{Shard: s, Num: num}
 	reply := shardrpc.FreezeShardReply{}
-	for !ck.Call(ck.servers[ck.Leader()], "KVServer.FreezeShard", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
+	if !ck.Call(ck.servers[ck.Leader()], "KVServer.FreezeShard", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
 		ck.leader = (ck.leader + 1) % len(ck.servers)
-		time.Sleep(20 * time.Millisecond)
-		reply = shardrpc.FreezeShardReply{}
+		if reply.Err == "" {
+			reply.Err = rpc.ErrWrongLeader
+		}
 	}
 	return reply.State, reply.Err
 }
@@ -65,10 +64,11 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum) rpc.Err {
 	arg := shardrpc.InstallShardArgs{Shard: s, State: state, Num: num}
 	reply := shardrpc.InstallShardReply{}
-	for !ck.Call(ck.servers[ck.Leader()], "KVServer.InstallShard", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
+	if !ck.Call(ck.servers[ck.Leader()], "KVServer.InstallShard", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
 		ck.leader = (ck.leader + 1) % len(ck.servers)
-		time.Sleep(20 * time.Millisecond)
-		reply = shardrpc.InstallShardReply{}
+		if reply.Err == "" {
+			reply.Err = rpc.ErrWrongLeader
+		}
 	}
 	return reply.Err
 }
@@ -76,10 +76,11 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	arg := shardrpc.DeleteShardArgs{Shard: s, Num: num}
 	reply := shardrpc.DeleteShardReply{}
-	for !ck.Call(ck.servers[ck.Leader()], "KVServer.DeleteShard", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
+	if !ck.Call(ck.servers[ck.Leader()], "KVServer.DeleteShard", &arg, &reply) || reply.Err == rpc.ErrWrongLeader {
 		ck.leader = (ck.leader + 1) % len(ck.servers)
-		time.Sleep(20 * time.Millisecond)
-		reply = shardrpc.DeleteShardReply{}
+		if reply.Err == "" {
+			reply.Err = rpc.ErrWrongLeader
+		}
 	}
 	return reply.Err
 }
